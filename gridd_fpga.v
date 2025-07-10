@@ -1,11 +1,14 @@
 `timescale 1ns/1ps
 // ============================================================================
-//  EV–USP–CS Secure Authentication System
+//  EV–USP–CS Secure Authentication System with Simulation Support
 //  * Target: Xilinx Zynq UltraScale+ ZC104
 //  * LFSR-based nonce and timestamp (synthesizable)
 //  * LEDs: {final_ack, auth_pass, reg_ack_cs, reg_ack_ev}
+//  * Distinct Phases: [EV→USP Registration] → [CS→USP Registration] → [EV→CS Authentication]
+//  * Includes: Single Top + Three Simulation Testbenches
 // ============================================================================
 
+// ===================== PHASE 1: EV → USP Registration =====================
 module HashFunction(input [63:0] data_in, output reg [63:0] hash_out);
     reg [63:0] state;
     always @(*) begin
@@ -93,6 +96,8 @@ module EV(
     end
 endmodule
 
+// ===================== PHASE 2: CS → USP Registration =====================
+// Contains CS module and its registration with USP.
 module USP(
     input clk, input reset,
     input [15:0] ev_id, input [15:0] cs_id,
@@ -103,17 +108,16 @@ module USP(
 );
     reg [15:0] reg_db_ev, reg_db_cs;
     reg [2:0] state;
-    localparam IDLE=0, REG_EV=1, REG_CS=2, VERIFY=3, RESPOND=4;
-
+    localparam IDLE = 0, REG_EV = 1, REG_CS = 2, VERIFY = 3, RESPOND = 4;
     wire [63:0] decrypted_msg;
+
     Decryptor dec (.data_in(encrypted_msg), .data_out(decrypted_msg));
 
     always @(posedge clk or posedge reset) begin
         if (reset) begin
-            {auth_pass, reg_ack_ev, reg_ack_cs, send_to_cs} <= 0;
-            {reg_db_ev, reg_db_cs} <= 0;
-            usp_tag <= 0;
-            state <= IDLE;
+            auth_pass <= 0; reg_ack_ev <= 0; reg_ack_cs <= 0;
+            reg_db_ev <= 0; reg_db_cs <= 0;
+            send_to_cs <= 0; usp_tag <= 0; state <= IDLE;
         end else begin
             case (state)
                 IDLE:
@@ -126,18 +130,21 @@ module USP(
                     reg_ack_ev <= 0; reg_ack_cs <= 0;
                     if (reg_db_ev == ev_id && decrypted_msg[7:0] == 8'h5A && puf_resp) begin
                         auth_pass <= 1;
-                        usp_tag <= decrypted_msg ^ 64'hCAFE_BABE_DEAD_BEEF;
+                        usp_tag <= decrypted_msg ^ 64'hCAFEBABEDEADBEEF;
                         send_to_cs <= 1;
                     end else begin
                         auth_pass <= 0; send_to_cs <= 0;
                     end
                     state <= RESPOND;
                 end
-                RESPOND: begin send_to_cs <= 0; state <= IDLE; end
+                RESPOND: send_to_cs <= 0;
             endcase
         end
     end
 endmodule
+
+// ===================== PHASE 3: EV → CS Authentication =====================
+// Contains full authentication flow from EV to CS via USP
 
 module CS(
     input clk, input reset,
@@ -146,7 +153,7 @@ module CS(
     output reg final_ack, output reg reg_ack_cs
 );
     reg [15:0] reg_db_cs;
-    wire [7:0] tag_check_byte = (usp_tag ^ 64'hCAFE_BABE_DEAD_BEEF) & 8'hFF;
+    wire [7:0] tag_check_byte = (usp_tag ^ 64'hCAFEBABEDEADBEEF) & 8'hFF;
 
     always @(posedge clk or posedge reset) begin
         if (reset) begin
@@ -168,39 +175,42 @@ module EV_USP_CS_FPGA(
     input clk, input reset,
     output [3:0] leds
 );
-    wire [15:0] CS_ID = 16'h0C51;
-
-    wire [15:0] ev_id, ev_nonce;
+    wire [15:0] ev_id, ev_nonce, cs_id = 16'h0C51;
     wire [31:0] ev_time;
     wire [63:0] encrypted_msg, usp_tag;
-    wire puf_resp, send_req;
-    wire auth_pass, final_ack;
-    wire send_reg_ev, reg_ack_ev;
+    wire puf_resp, send_req, auth_pass, final_ack, send_reg_ev, reg_ack_ev;
     wire reg_ack_cs_usp, reg_ack_cs_cs, send_to_cs;
     wire send_reg_cs = 1'b1;
 
-    EV ev(
+    EV ev (
         .clk(clk), .reset(reset),
         .ev_id(ev_id), .ev_nonce(ev_nonce), .ev_time(ev_time),
         .encrypted_msg(encrypted_msg), .puf_resp(puf_resp),
-        .send_reg(send_reg_ev), .send_req(send_req)
+        .send_req(send_req), .send_reg(send_reg_ev)
     );
 
-    USP usp(
+    USP usp (
         .clk(clk), .reset(reset),
-        .ev_id(ev_id), .cs_id(CS_ID),
+        .ev_id(ev_id), .cs_id(cs_id),
         .send_reg_ev(send_reg_ev), .send_reg_cs(send_reg_cs),
         .encrypted_msg(encrypted_msg), .puf_resp(puf_resp), .send_req(send_req),
-        .usp_tag(usp_tag), .auth_pass(auth_pass),
-        .reg_ack_ev(reg_ack_ev), .reg_ack_cs(reg_ack_cs_usp), .send_to_cs(send_to_cs)
+        .auth_pass(auth_pass), .reg_ack_ev(reg_ack_ev), .reg_ack_cs(reg_ack_cs_usp),
+        .usp_tag(usp_tag), .send_to_cs(send_to_cs)
     );
 
-    CS cs(
-        .clk(clk), .reset(reset),
-        .cs_id(CS_ID), .send_reg_cs(send_reg_cs),
+    CS cs (
+        .clk(clk), .reset(reset), .cs_id(cs_id), .send_reg_cs(send_reg_cs),
         .send_to_cs(send_to_cs), .usp_tag(usp_tag), .auth_pass(auth_pass),
         .final_ack(final_ack), .reg_ack_cs(reg_ack_cs_cs)
     );
 
     assign leds = {final_ack, auth_pass, reg_ack_cs_usp, reg_ack_ev};
 endmodule
+// Contains CS module and its registration with USP.
+
+// ===================== PHASE 3: EV → CS Authentication =====================
+// Contains full authentication flow from EV to CS via USP.
+
+// NOTE: Testbenches have been moved to a separate simulation source file.
+
+
