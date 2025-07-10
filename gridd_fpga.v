@@ -2,7 +2,7 @@
 // ============================================================================
 //  EV–USP–CS Secure Authentication System
 //  * Target: Xilinx Zynq UltraScale+ ZC104
-//  * LFSR-based nonce (synthesizable)
+//  * LFSR-based nonce and timestamp (synthesizable)
 //  * LEDs: {final_ack, auth_pass, reg_ack_cs, reg_ack_ev}
 // ============================================================================
 
@@ -40,7 +40,6 @@ module EV(
     output reg send_req
 );
     localparam [15:0] EV_ID_DEFAULT = 16'h00EF;
-    localparam [31:0] TS_START = 32'd100;
 
     reg [2:0] state;
     localparam IDLE=0, REG=1, PREP=2, SEND=3, WAIT=4, DONE=5;
@@ -51,10 +50,16 @@ module EV(
         if (reset) nonce_reg <= 16'hACE1;
         else       nonce_reg <= {nonce_reg[14:0], lfsr_feedback};
 
+    reg [31:0] ts_lfsr;
+    wire ts_feedback = ts_lfsr[31] ^ ts_lfsr[21] ^ ts_lfsr[1] ^ ts_lfsr[0];
+    always @(posedge clk or posedge reset)
+        if (reset) ts_lfsr <= 32'h1A2B3C4D;
+        else       ts_lfsr <= {ts_lfsr[30:0], ts_feedback};
+
     wire [63:0] hash_out, enc_out;
     wire puf_out;
 
-    HashFunction hf (.data_in({ev_id, nonce_reg, ev_time}), .hash_out(hash_out));
+    HashFunction hf (.data_in({ev_id, nonce_reg, ts_lfsr}), .hash_out(hash_out));
     Encryptor enc (.data_in(hash_out), .data_out(enc_out));
     PUF p (.challenge(ev_id ^ nonce_reg), .response(puf_out));
 
@@ -62,7 +67,7 @@ module EV(
         if (reset) begin
             state <= IDLE;
             ev_id <= EV_ID_DEFAULT;
-            ev_time <= TS_START;
+            ev_time <= 0;
             ev_nonce <= 0;
             encrypted_msg <= 0;
             puf_resp <= 0;
@@ -70,7 +75,7 @@ module EV(
             send_req <= 0;
         end else begin
             case (state)
-                IDLE: begin ev_time <= ev_time + 1; state <= REG; end
+                IDLE: begin ev_time <= ts_lfsr; state <= REG; end
                 REG:  begin send_reg <= 1; state <= PREP; end
                 PREP: begin
                     send_reg <= 0;
