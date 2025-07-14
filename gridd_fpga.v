@@ -115,6 +115,7 @@ module EV_USP_Registration (
                     temp_m2 = xor256_k64(M2, common_key);
                     Aj <= temp_m2[191:128];
                     ID_j <= temp_m2[127:64];
+                    pub_j <= temp_m2[63:0];
                     registration_complete <= 1;
                     registration_failed <= 0;
                 end
