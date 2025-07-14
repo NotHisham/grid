@@ -187,7 +187,7 @@ module CS_USP_Registration (
                 end else begin
                     temp_m2 = xor256_k64(M2, prvk);
                     Aj <= temp_m2[191:128];
-                    usp_id_j <= temp_m2[127:64];
+                    ID_j <= temp_m2[127:64];
                     registration_complete  <= 1;
                     registration_failed    <= 0;
                 end
