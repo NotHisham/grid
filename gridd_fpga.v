@@ -76,6 +76,7 @@ module EV_USP_Registration (
     output reg registration_failed
 );
     import crypto_utils::*;
+    parameter [63:0] EV_ID = 64'hEEEEEEEEEEEEEEEE
     parameter ACCEPTABLE_DELAY = 10;
 
     reg [63:0] rs_i;
@@ -144,6 +145,7 @@ module CS_USP_Registration (
     output reg          registration_failed
 );
     import crypto_utils::*;
+    parameter [63:0] CS_ID = 64'hDDDDDDDDDDDDDDDD;
     parameter ACCEPTABLE_DELAY = 10;
 
     // Internal random number state for nonce/challenge
@@ -234,7 +236,6 @@ module EV_CS_Authentication #(
     // Token
     reg [63:0] TK_i;
 
-    localparam [63:0] CS_ID = 64'hDDDDDDDDDDDDDDDD;
     localparam [63:0] T_VALID = 64'd60; // token validity
 
     always @(posedge clk or posedge rst) begin
