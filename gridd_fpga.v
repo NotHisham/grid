@@ -266,21 +266,20 @@ module EV_CS_Authentication #(
                     CH_i      <= M2_dec[255:192];
                     seed      <= M2_dec[127:64];
                     RS_prime_i <= puf_i(CH_i);
-
-                    if (RS_prime_i != ev_rs_i) begin
+                    CH_k <= lfsr_next(lfsr);
+                    k_i  <= puf_i(seed);
+                    M3   <= xor384_k64({ev_psidev_i, CH_i, RS_prime_i, CH_k, k_i}, cs_pub_key_k);
+                    TS4 = TS3 + 6;
+                    if ((TS4 - TS3) > ACCEPTABLE_DELAY) begin
                         mutual_auth_ok <= 0;
                     end else begin
-                        CH_k <= lfsr_next(lfsr);
-                        k_i  <= puf_i(seed);
-                        M3   <= xor384_k64({ev_psidev_i, CH_i, RS_prime_i, CH_k, k_i}, cs_pub_key_k);
-                        TS4 = TS3 + 6;
-                        if ((TS4 - TS3) > ACCEPTABLE_DELAY) begin
+                        if (RS_prime_i != ev_rs_i) begin
                             mutual_auth_ok <= 0;
                         end else begin
-                            k_ki  <= hash192(k_i ^ k_k);
                             N4    <= lfsr_next(lfsr);
                             TK_i  <= hash192({ev_psidev_i, T_VALID, RS_prime_i, CS_ID});
                             RS_k_received = puf(CH_k);
+                            k_ki  <= hash192(k_i ^ k_k);
                             M4    <= xor448_k64({CS_ID, CH_k, N4, RS_k_received, TK_i, k_k}, k_ki);
                             TS5 = TS4 + 5;
                             M4_dec = xor448_k64(M4, k_ki);
