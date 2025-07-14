@@ -151,7 +151,7 @@ module CS_USP_Registration (
     reg [63:0] cs_ch_k;  // generated nonce (challenge)
     reg [63:0] cs_rs_k;
     reg [63:0] TS2, TS3, received_t1;
-    reg [63:0] Aj;
+    reg [63:0] Aj,ID_j;
     reg [127:0] temp_m2;
 
     always @(posedge clk or posedge rst) begin
