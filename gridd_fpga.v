@@ -1,146 +1,611 @@
-//------------------------
-// Crypto Utility Library (now functions only, not a separate module)
-//------------------------
+//############################################################################
+//
+// Module: Top_Authentication_System_for_ZCU104
+// Description: Top-level module integrating registration and authentication
+//              for an Electric Vehicle (EV) and Charging Station (CS).
+//
+//############################################################################
+module Top_Authentication_System_for_ZCU104 (
+    input  wire clk,
+    input  wire rst,
+    input  wire start_registration_ev,
+    input  wire start_registration_cs,
+    input  wire start_authentication,
 
-function [63:0] puf(input [63:0] challenge);
-    reg [63:0] lfsr_reg; integer i;
-    begin
-        lfsr_reg = challenge;
-        for (i = 0; i < 64; i = i + 1)
-            lfsr_reg = {lfsr_reg[62:0], lfsr_reg[63] ^ lfsr_reg[62] ^ lfsr_reg[60] ^ lfsr_reg[59]};
-        puf = lfsr_reg;
-    end
-endfunction
-
-function [63:0] hash192(input [255:0] data);
-    reg [63:0] state; reg [63:0] round_key; integer i; reg [63:0] chunk;
-    begin
-        state = 64'hA5A5A5A5A5A5A5A5;
-        for (i = 0; i < 4; i = i + 1) begin
-            chunk = data[i*64 +: 64];
-            round_key = 64'hC3C3C3C3C3C3C3C3 >> (i * 9);
-            state = (state ^ chunk) ^ ((state <<< 3) ^ (state >> 5)) ^ round_key;
-        end
-        hash192 = state;
-    end
-endfunction
-
-function [255:0] xor256_k64(input [255:0] msg, input [63:0] key);
-    xor256_k64 = msg ^ {4{key}};
-endfunction
-
-function [319:0] xor320_k64(input [319:0] msg, input [63:0] key);
-    xor320_k64 = msg ^ {5{key}};
-endfunction
-
-function [383:0] xor384_k64(input [383:0] msg, input [63:0] key);
-    xor384_k64 = msg ^ {6{key}};
-endfunction
-
-function [447:0] xor448_k64(input [447:0] msg, input [63:0] key);
-    xor448_k64 = msg ^ {7{key}};
-endfunction
-
-function [63:0] lfsr_next(input [63:0] current);
-    lfsr_next = {current[62:0], current[63] ^ current[62] ^ current[60] ^ current[59]};
-endfunction
-
-function [63:0] puf_i(input [63:0] challenge);
-    puf_i = puf(challenge);
-endfunction
-
-function [63:0] puf_k(input [63:0] challenge);
-    puf_k = puf(challenge);
-endfunction
-
-//------------------------
-// EV-CS Authentication
-//------------------------
-module EV_CS_Authentication #(
-    parameter ACCEPTABLE_DELAY = 10
-)(
-    input  wire        clk,
-    input  wire        rst,
-    input  wire [63:0] ev_psidev_i,
-    input  wire [63:0] ev_rs_i,
-    input  wire [63:0] ev_pub_key_i,
-    input  wire [63:0] cs_pub_key_k,
-    input  wire [63:0] cs_prv_key_k,
-    output reg         mutual_auth_ok
+    output wire ev_reg_status,
+    output wire cs_reg_status,
+    output wire ev_auth_status,
+    output wire cs_auth_status,
+    output wire mutual_auth_status,
+    output wire auth_process_active
 );
 
-    reg [63:0] lfsr, N1, N2, N4;
-    reg [63:0] CH_i, CH_k, seed;
-    reg [63:0] k_i, k_k, k_ki, k_ik;
-    reg [255:0] M1;
-    reg [319:0] M2, M2_dec;
-    reg [383:0] M3;
-    reg [447:0] M4, M4_dec;
-    reg [63:0] TS1, TS2, TS3, TS4, TS5;
-    reg [63:0] RS_prime_i, RS_k_received;
-    reg [63:0] RS_k_local;
-    reg [63:0] TK_i;
+    // Parameters
+    localparam [63:0] USP_ID_J = 64'hDDDDDDDDDDDDDDDD;
+    localparam [63:0] USP_PUB_KEY_J = 64'hF0F0F0F0F0F0F0F0;
+    localparam [63:0] COMMON_KEY_USP = 64'h1A2B3C4D5E6F7A8B;
+    localparam MAX_DELAY = 8'd100;
+    localparam DELAY_THRESHOLD = 8'd50;
+    localparam TIMEOUT_CYCLES = 24'd10_000_000; // ~200ms at 50MHz
 
-    localparam [63:0] CS_ID = 64'hDDDDDDDDDDDDDDDD;
-    localparam [63:0] T_VALID = 64'd60;
+    // Wires and Registers
+    wire [63:0] ev_psidev_reg;
+    wire [63:0] ev_rs_reg;
+    wire [63:0] ev_pub_key_reg;
+    wire [63:0] ev_prv_key_reg;
+    wire        ev_registration_complete;
+    wire        ev_registration_failed;
 
+    wire [63:0] cs_id_reg;
+    wire [63:0] cs_pub_key_reg;
+    wire [63:0] cs_prv_key_reg;
+    wire        cs_registration_complete;
+    wire        cs_registration_failed;
+
+    wire [447:0] ev_to_cs_msg;
+    wire         ev_to_cs_valid;
+    wire [447:0] cs_to_ev_msg;
+    wire         cs_to_ev_valid;
+
+    // Mutual Authentication Signals
+    wire ev_mutual_complete;
+    wire cs_mutual_complete;
+    
+    // Pipeline Registers to simulate communication delay
+    reg [447:0] ev_to_cs_msg_pipe;
+    reg         ev_to_cs_valid_pipe;
+    reg [447:0] cs_to_ev_msg_pipe;
+    reg         cs_to_ev_valid_pipe;
+
+    // Registration Processing Signals
+    reg [7:0]   ev_reg_delay_counter;
+    reg [191:0] temp_m2_dec;
+    reg [63:0]  Aj_reg;
+    reg [63:0]  ID_j_reg;
+    reg [63:0]  PUB_j_reg;
+    reg [23:0]  auth_timeout_counter;
+    reg         auth_in_progress;
+
+    // XOR Function (Placeholder for actual crypto)
+    function [191:0] xor192_k64;
+        input [191:0] a;
+        input [63:0]  b;
+        begin
+            xor192_k64 = {a[191:128] ^ b, a[127:64] ^ b, a[63:0] ^ b};
+        end
+    endfunction
+
+    // Pipeline Registers for message passing
     always @(posedge clk or posedge rst) begin
         if (rst) begin
-            mutual_auth_ok <= 0;
-            lfsr <= 64'h3;
+            ev_to_cs_msg_pipe <= 0;
+            ev_to_cs_valid_pipe <= 0;
+            cs_to_ev_msg_pipe <= 0;
+            cs_to_ev_valid_pipe <= 0;
         end else begin
-            lfsr <= lfsr_next(lfsr);
-            N1   <= lfsr;
-            TS1  <= $time;
-            M1   <= xor256_k64({64'd0, ev_psidev_i, N1, ev_pub_key_i}, cs_pub_key_k);
+            ev_to_cs_msg_pipe <= ev_to_cs_msg;
+            ev_to_cs_valid_pipe <= ev_to_cs_valid;
+            cs_to_ev_msg_pipe <= cs_to_ev_msg;
+            cs_to_ev_valid_pipe <= cs_to_ev_valid;
+        end
+    end
 
-            TS2 = TS1 + 5;
-            if ((TS2 - TS1) > ACCEPTABLE_DELAY) begin
-                mutual_auth_ok <= 0;
-            end else begin
-                CH_i <= 64'hAAAAAAAAAAAAAAAA;
-                seed <= 64'hBBBBBBBBBBBBBBBB;
-                N2   <= lfsr_next(lfsr);
-                k_k  <= puf_k(seed);
-                M2   <= xor320_k64({CS_ID, CH_i, N2, seed, 64'd0}, ev_pub_key_i);
+    // Registration Processing Logic (Placeholder)
+    // This block is for demonstration and would contain actual protocol logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            temp_m2_dec <= 192'b0;
+            Aj_reg <= 64'b0;
+            ID_j_reg <= 64'b0;
+            PUB_j_reg <= 64'b0;
+            ev_reg_delay_counter <= 8'b0;
+        end else if (start_registration_ev) begin
+            // Placeholder logic for processing a registration message
+            // temp_m2_dec <= xor192_k64(M2_received_reg, COMMON_KEY_USP);
+            // Aj_reg <= temp_m2_dec[191:128];
+            // ID_j_reg <= temp_m2_dec[127:64];
+            // PUB_j_reg <= temp_m2_dec[63:0];
+            
+            if (ev_reg_delay_counter < MAX_DELAY) begin
+                ev_reg_delay_counter <= ev_reg_delay_counter + 1;
+            end
+        end
+    end
 
-                TS3 = TS2 + 4;
-                if ((TS3 - TS2) > ACCEPTABLE_DELAY) begin
-                    mutual_auth_ok <= 0;
+    // Authentication Timeout Counter
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            auth_timeout_counter <= 0;
+            auth_in_progress <= 0;
+        end else begin
+            if (start_authentication) begin
+                auth_timeout_counter <= 0;
+                auth_in_progress <= 1;
+            end else if (auth_in_progress) begin
+                if (auth_timeout_counter < TIMEOUT_CYCLES) begin
+                    auth_timeout_counter <= auth_timeout_counter + 1;
                 end else begin
-                    M2_dec    = xor320_k64(M2, ev_pub_key_i);
-                    CH_i      <= M2_dec[255:192];
-                    seed      <= M2_dec[127:64];
-                    RS_prime_i <= puf_i(CH_i);
-                    CH_k <= lfsr_next(lfsr);
-                    k_i  <= puf_i(seed);
-                    M3   <= xor384_k64({ev_psidev_i, CH_i, RS_prime_i, CH_k, k_i, 64'd0}, cs_pub_key_k);
-                    TS4 = TS3 + 6;
-                    if ((TS4 - TS3) > ACCEPTABLE_DELAY) begin
-                        mutual_auth_ok <= 0;
-                    end else begin
-                        if (RS_prime_i != ev_rs_i) begin
-                            mutual_auth_ok <= 0;
-                        end else begin
-                            N4    <= lfsr_next(lfsr);
-                            TK_i  <= hash192({ev_psidev_i, T_VALID, RS_prime_i, CS_ID});
-                            RS_k_local = puf(CH_k);
-                            k_ki  <= hash192({192'd0, k_i ^ k_k});
-                            M4    <= xor448_k64({CS_ID, CH_k, N4, RS_k_local, TK_i, k_k, 64'd0}, k_ki);
-                            TS5 = TS4 + 5;
-                            M4_dec = xor448_k64(M4, k_ki);
-                            RS_k_received = M4_dec[255:192];
-                            k_ik = hash192({192'd0, k_i ^ k_k});
-
-                            if ((TS5 - TS4) <= ACCEPTABLE_DELAY && RS_k_received == RS_k_local && k_ik == k_ki) begin
-                                mutual_auth_ok <= 1;
-                            end else begin
-                                mutual_auth_ok <= 0;
-                            end
-                        end
-                    end
+                    auth_in_progress <= 0; // Timeout occurred
+                end
+                
+                // Process completes on mutual success
+                if (mutual_auth_status) begin
+                    auth_in_progress <= 0;
                 end
             end
         end
+    end
+
+    // Module Instantiations
+    EV_USP_Registration ev_usp_reg_inst (
+        .clk(clk),
+        .rst(rst),
+        .start_registration(start_registration_ev),
+        .ev_raw_id_i(64'h1111_1111_1111_1111),
+        .ev_raw_ch_i(64'hAAAA_BBBB_CCCC_DDDD),
+        .ev_raw_pub_key_i(64'hEEEE_EEEE_EEEE_EEEE),
+        .ev_raw_prv_key_i(64'hFFFF_FFFF_FFFF_FFFF),
+        .usp_id_j_in(USP_ID_J),
+        .usp_pub_key_j_in(USP_PUB_KEY_J),
+        .common_key_in(COMMON_KEY_USP),
+        .ev_psidev_out(ev_psidev_reg),
+        .ev_rs_out(ev_rs_reg),
+        .ev_pub_key_out(ev_pub_key_reg),
+        .ev_prv_key_out(ev_prv_key_reg),
+        .registration_complete(ev_registration_complete),
+        .registration_failed(ev_registration_failed)
+    );
+
+    CS_USP_Registration cs_usp_reg_inst (
+        .clk(clk),
+        .rst(rst),
+        .start_registration(start_registration_cs),
+        .cs_raw_id_k(64'h2222_2222_2222_2222),
+        .cs_raw_pub_key_k(64'h1234_5678_9ABC_DEF0),
+        .cs_raw_prv_key_k(64'h0FED_CBA9_8765_4321),
+        .usp_id_j_in(USP_ID_J),
+        .usp_pub_key_j_in(USP_PUB_KEY_J),
+        .common_key_in(COMMON_KEY_USP),
+        .cs_id_out(cs_id_reg),
+        .cs_pub_key_out(cs_pub_key_reg),
+        .cs_prv_key_out(cs_prv_key_reg),
+        .registration_complete(cs_registration_complete),
+        .registration_failed(cs_registration_failed)
+    );
+
+    EV_Authentication_Module ev_auth_inst (
+        .clk(clk),
+        .rst(rst),
+        .start_auth(start_authentication),
+        .EV_PS_ID_SELF(ev_psidev_reg),
+        .EV_PUF_CH_I_STORED(64'hAAAA_BBBB_CCCC_DDDD),
+        .EV_PUB_KEY_SELF(ev_pub_key_reg),
+        .EV_PRV_KEY_SELF(ev_prv_key_reg),
+        .CS_PUB_KEY_KNOWN(cs_pub_key_reg),
+        .CS_ID_KNOWN(cs_id_reg),
+        .ev_rx_msg(cs_to_ev_msg_pipe),
+        .ev_rx_valid(cs_to_ev_valid_pipe),
+        .ev_tx_msg(ev_to_cs_msg),
+        .ev_tx_valid(ev_to_cs_valid),
+        .ev_auth_ok(ev_auth_status),
+        .cs_auth_ok(cs_auth_status),
+        .mutual_auth_complete(ev_mutual_complete)
+    );
+
+    CS_Authentication_Module cs_auth_inst (
+        .clk(clk),
+        .rst(rst),
+        .start_auth(start_authentication),
+        .CS_ID_SELF(cs_id_reg),
+        .CS_PUB_KEY_SELF(cs_pub_key_reg),
+        .CS_PRV_KEY_SELF(cs_prv_key_reg),
+        .EV_PUB_KEY_KNOWN(ev_pub_key_reg),
+        .EV_PS_ID_KNOWN(ev_psidev_reg),
+        .cs_rx_msg(ev_to_cs_msg_pipe),
+        .cs_rx_valid(ev_to_cs_valid_pipe),
+        .cs_tx_msg(cs_to_ev_msg),
+        .cs_tx_valid(cs_to_ev_valid),
+        .cs_auth_ok(cs_auth_status),
+        .ev_auth_ok(ev_auth_status),
+        .mutual_auth_complete(cs_mutual_complete)
+    );
+
+    // Output Assignments
+    assign ev_reg_status = ev_registration_complete && !ev_registration_failed;
+    assign cs_reg_status = cs_registration_complete && !cs_registration_failed;
+    assign mutual_auth_status = ev_mutual_complete && cs_mutual_complete;
+    assign auth_process_active = auth_in_progress;
+
+endmodule
+
+//############################################################################
+//
+// Module: EV_USP_Registration
+// Description: Handles the registration process for the Electric Vehicle (EV).
+//
+//############################################################################
+module EV_USP_Registration (
+    input               clk,
+    input               rst,
+    input               start_registration,
+    input [63:0]        ev_raw_id_i,
+    input [63:0]        ev_raw_ch_i,
+    input [63:0]        ev_raw_pub_key_i,
+    input [63:0]        ev_raw_prv_key_i,
+    input [63:0]        usp_id_j_in,
+    input [63:0]        usp_pub_key_j_in,
+    input [63:0]        common_key_in,
+    output reg [63:0]   ev_psidev_out,
+    output reg [63:0]   ev_rs_out,
+    output reg [63:0]   ev_pub_key_out,
+    output reg [63:0]   ev_prv_key_out,
+    output reg          registration_complete,
+    output reg          registration_failed
+);
+
+    // -- FIX: Replaced typedef enum with localparam for Verilog-2001 compatibility --
+    localparam [2:0] IDLE           = 3'b000;
+    localparam [2:0] GENERATE_PSID  = 3'b001;
+    localparam [2:0] GENERATE_RS    = 3'b010;
+    localparam [2:0] KEY_GENERATION = 3'b011;
+    localparam [2:0] COMPLETE       = 3'b100;
+    localparam [2:0] FAILED         = 3'b101;
+
+    reg [2:0] current_state, next_state;
+    wire keygen_failed = 1'b0; // Placeholder for key generation failure
+
+    // State machine logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            current_state <= IDLE;
+            registration_complete <= 0;
+            registration_failed <= 0;
+            ev_psidev_out <= 0;
+            ev_rs_out <= 0;
+            ev_pub_key_out <= 0;
+            ev_prv_key_out <= 0;
+        end else begin
+            current_state <= next_state;
+            if (current_state == COMPLETE) begin
+                registration_complete <= 1;
+            end else if (current_state == FAILED) begin
+                registration_failed <= 1;
+            end
+        end
+    end
+
+    // Combinational logic for state transitions and outputs
+    always @(*) begin
+        next_state = current_state;
+        
+        case (current_state)
+            IDLE:
+                if (start_registration) begin
+                    next_state = GENERATE_PSID;
+                end
+            
+            GENERATE_PSID: begin
+                ev_psidev_out = ev_raw_id_i ^ usp_id_j_in; 
+                next_state = GENERATE_RS;
+            end
+            
+            GENERATE_RS: begin
+                ev_rs_out = ev_raw_ch_i ^ ev_psidev_out;
+                next_state = KEY_GENERATION;
+            end
+            
+            KEY_GENERATION: begin
+                ev_pub_key_out = ev_raw_pub_key_i;
+                ev_prv_key_out = ev_raw_prv_key_i;
+                if (keygen_failed) begin
+                    next_state = FAILED;
+                end else begin
+                    next_state = COMPLETE;
+                end
+            end
+            
+            COMPLETE, FAILED:
+                next_state = IDLE; 
+
+            default:
+                next_state = IDLE;
+        endcase
+    end
+endmodule
+
+//############################################################################
+//
+// Module: CS_USP_Registration
+// Description: Handles the registration process for the Charging Station (CS).
+//
+//############################################################################
+module CS_USP_Registration (
+    input               clk,
+    input               rst,
+    input               start_registration,
+    input [63:0]        cs_raw_id_k,
+    input [63:0]        cs_raw_pub_key_k,
+    input [63:0]        cs_raw_prv_key_k,
+    input [63:0]        usp_id_j_in,
+    input [63:0]        usp_pub_key_j_in,
+    input [63:0]        common_key_in,
+    output reg [63:0]   cs_id_out,
+    output reg [63:0]   cs_pub_key_out,
+    output reg [63:0]   cs_prv_key_out,
+    output reg          registration_complete,
+    output reg          registration_failed
+);
+
+    // -- FIX: Replaced typedef enum with localparam for Verilog-2001 compatibility --
+    localparam [2:0] IDLE           = 3'b000;
+    localparam [2:0] GENERATE_ID    = 3'b001;
+    localparam [2:0] KEY_GENERATION = 3'b010;
+    localparam [2:0] COMPLETE       = 3'b011;
+    localparam [2:0] FAILED         = 3'b100;
+
+    reg [2:0] current_state, next_state;
+    wire keygen_failed = 1'b0; // Placeholder for key generation failure
+
+    // State machine logic
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            current_state <= IDLE;
+            registration_complete <= 0;
+            registration_failed <= 0;
+            cs_id_out <= 0;
+            cs_pub_key_out <= 0;
+            cs_prv_key_out <= 0;
+        end else begin
+            current_state <= next_state;
+            if (current_state == COMPLETE) begin
+                registration_complete <= 1;
+            end else if (current_state == FAILED) begin
+                registration_failed <= 1;
+            end
+        end
+    end
+
+    // Combinational logic for state transitions and outputs
+    always @(*) begin
+        next_state = current_state;
+        
+        case (current_state)
+            IDLE:
+                if (start_registration) begin
+                    next_state = GENERATE_ID;
+                end
+            
+            GENERATE_ID: begin
+                cs_id_out = cs_raw_id_k ^ usp_id_j_in; 
+                next_state = KEY_GENERATION;
+            end
+            
+            KEY_GENERATION: begin
+                cs_pub_key_out = cs_raw_pub_key_k;
+                cs_prv_key_out = cs_raw_prv_key_k;
+                if (keygen_failed) begin
+                    next_state = FAILED;
+                end else begin
+                    next_state = COMPLETE;
+                end
+            end
+            
+            COMPLETE, FAILED:
+                next_state = IDLE;
+
+            default:
+                next_state = IDLE;
+        endcase
+    end
+endmodule
+
+//############################################################################
+//
+// Module: EV_Authentication_Module
+// Description: State machine for EV-side authentication.
+//
+//############################################################################
+module EV_Authentication_Module #(
+    parameter TIMEOUT_CYCLES = 24'd10_000_000
+) (
+    input               clk,
+    input               rst,
+    input               start_auth,
+    input [63:0]        EV_PS_ID_SELF,
+    input [63:0]        EV_PUF_CH_I_STORED,
+    input [63:0]        EV_PUB_KEY_SELF,
+    input [63:0]        EV_PRV_KEY_SELF,
+    input [63:0]        CS_PUB_KEY_KNOWN,
+    input [63:0]        CS_ID_KNOWN,
+    input [447:0]       ev_rx_msg,
+    input               ev_rx_valid,
+    output reg [447:0]  ev_tx_msg,
+    output reg          ev_tx_valid,
+    output reg          ev_auth_ok,
+    input               cs_auth_ok,
+    input               mutual_auth_complete,
+    output reg          mutual_auth_complete_out
+);
+
+    localparam [2:0] IDLE                        = 3'b000;
+    localparam [2:0] INITIATE_AUTH               = 3'b001;
+    localparam [2:0] WAIT_FOR_CS_RESPONSE        = 3'b010;
+    localparam [2:0] VERIFY_CS                   = 3'b011;
+    localparam [2:0] AWAIT_MUTUAL_CONFIRMATION   = 3'b100;
+    localparam [2:0] MUTUAL_AUTH_SUCCESS         = 3'b101;
+    localparam [2:0] AUTH_FAILED                 = 3'b110;
+
+    reg [2:0] current_state, next_state;
+    reg [23:0] timeout_counter;
+
+    wire verification_passed = (ev_rx_msg[63:0] == CS_ID_KNOWN);
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            current_state <= IDLE;
+            timeout_counter <= 0;
+            mutual_auth_complete_out <= 0;
+            ev_tx_msg <= 448'b0; // Initialize output
+            ev_tx_valid <= 1'b0;
+            ev_auth_ok <= 1'b0;
+        end else begin
+            current_state <= next_state;
+            if (current_state == WAIT_FOR_CS_RESPONSE || current_state == AWAIT_MUTUAL_CONFIRMATION) begin
+                timeout_counter <= timeout_counter + 1;
+            end else begin
+                timeout_counter <= 0;
+            end
+            if (next_state == MUTUAL_AUTH_SUCCESS) begin
+                mutual_auth_complete_out <= 1;
+            end
+        end
+    end
+
+    always @(*) begin
+        next_state = current_state;
+        ev_tx_valid = 1'b0;
+        ev_tx_msg = 448'b0; // Default assignment
+        ev_auth_ok = 1'b0;
+
+        case (current_state)
+            IDLE:
+                if (start_auth) begin
+                    next_state = INITIATE_AUTH;
+                end
+            INITIATE_AUTH: begin
+                ev_tx_valid = 1'b1;
+                ev_tx_msg = {EV_PS_ID_SELF, EV_PUB_KEY_SELF, 320'd0};
+                next_state = WAIT_FOR_CS_RESPONSE;
+            end
+            WAIT_FOR_CS_RESPONSE:
+                if (ev_rx_valid) begin
+                    next_state = VERIFY_CS;
+                end else if (timeout_counter >= TIMEOUT_CYCLES) begin
+                    next_state = AUTH_FAILED;
+                end
+            VERIFY_CS:
+                if (verification_passed) begin
+                    ev_auth_ok = 1'b1;
+                    next_state = AWAIT_MUTUAL_CONFIRMATION;
+                end else begin
+                    next_state = AUTH_FAILED;
+                end
+            AWAIT_MUTUAL_CONFIRMATION: begin
+                ev_auth_ok = 1'b1;
+                if (cs_auth_ok && mutual_auth_complete) begin // Require both
+                    next_state = MUTUAL_AUTH_SUCCESS;
+                end else if (timeout_counter >= TIMEOUT_CYCLES) begin
+                    next_state = AUTH_FAILED;
+                end
+            end
+            MUTUAL_AUTH_SUCCESS: begin
+                ev_auth_ok = 1'b1;
+                next_state = IDLE;
+            end
+            AUTH_FAILED:
+                next_state = IDLE;
+            default:
+                next_state = IDLE;
+        endcase
+    end
+endmodule
+
+//############################################################################
+//
+// Module: CS_Authentication_Module
+// Description: State machine for CS-side authentication.
+//
+//############################################################################
+module CS_Authentication_Module #(
+    parameter TIMEOUT_CYCLES = 24'd10_000_000
+) (
+    input               clk,
+    input               rst,
+    input               start_auth,
+    input [63:0]        CS_ID_SELF,
+    input [63:0]        CS_PUB_KEY_SELF,
+    input [63:0]        CS_PRV_KEY_SELF,
+    input [63:0]        EV_PUB_KEY_KNOWN,
+    input [63:0]        EV_PS_ID_KNOWN,
+    input [447:0]       cs_rx_msg,
+    input               cs_rx_valid,
+    output reg [447:0]  cs_tx_msg,
+    output reg          cs_tx_valid,
+    output reg          cs_auth_ok,
+    input               ev_auth_ok,
+    output reg          mutual_auth_complete
+);
+    
+    localparam [2:0] IDLE                        = 3'b000;
+    localparam [2:0] WAIT_FOR_EV_REQUEST         = 3'b001;
+    localparam [2:0] VERIFY_EV_AND_RESPOND       = 3'b010;
+    localparam [2:0] AWAIT_MUTUAL_CONFIRMATION   = 3'b011;
+    localparam [2:0] MUTUAL_AUTH_SUCCESS         = 3'b100;
+    localparam [2:0] AUTH_FAILED                 = 3'b101;
+
+    reg [2:0] current_state, next_state;
+    reg [23:0] timeout_counter;
+
+    wire verification_passed = (cs_rx_msg[447:384] == EV_PS_ID_KNOWN);
+
+    always @(posedge clk or posedge rst) begin
+        if (rst) begin
+            current_state <= IDLE;
+            timeout_counter <= 0;
+        end else begin
+            current_state <= next_state;
+            if (current_state == WAIT_FOR_EV_REQUEST || current_state == AWAIT_MUTUAL_CONFIRMATION) begin
+                timeout_counter <= timeout_counter + 1;
+            end else begin
+                timeout_counter <= 0;
+            end
+        end
+    end
+
+    always @(*) begin
+        next_state = current_state;
+        cs_tx_valid = 1'b0;
+        cs_tx_msg = 448'b0;
+        cs_auth_ok = 1'b0;
+        mutual_auth_complete = 1'b0;
+        
+        case (current_state)
+            IDLE:
+                if (start_auth) begin
+                    next_state = WAIT_FOR_EV_REQUEST;
+                end
+            WAIT_FOR_EV_REQUEST:
+                if (cs_rx_valid) begin
+                    next_state = VERIFY_EV_AND_RESPOND;
+                end else if (timeout_counter >= TIMEOUT_CYCLES) begin
+                    next_state = AUTH_FAILED;
+                end
+            VERIFY_EV_AND_RESPOND:
+                if (verification_passed) begin 
+                    cs_tx_valid = 1'b1;
+                    cs_tx_msg = {CS_ID_SELF, CS_PUB_KEY_SELF, 320'd0};
+                    cs_auth_ok = 1'b1;
+                    next_state = AWAIT_MUTUAL_CONFIRMATION;
+                end else begin
+                    next_state = AUTH_FAILED;
+                end
+            AWAIT_MUTUAL_CONFIRMATION: begin
+                cs_auth_ok = 1'b1;
+                if (ev_auth_ok) begin
+                    next_state = MUTUAL_AUTH_SUCCESS;
+                end else if (timeout_counter >= TIMEOUT_CYCLES) begin
+                    next_state = AUTH_FAILED;
+                end
+            end
+            MUTUAL_AUTH_SUCCESS: begin
+                cs_auth_ok = 1'b1;
+                mutual_auth_complete = 1'b1;
+                next_state = IDLE;
+            end
+            AUTH_FAILED:
+                next_state = IDLE;
+            default:
+                next_state = IDLE;
+        endcase
     end
 endmodule
